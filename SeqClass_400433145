@@ -1,0 +1,149 @@
+import pandas as pd
+
+# Load the dataset
+df = pd.read_csv("path_to_your_data.csv")
+
+# Features and labels
+X = df.drop('Label', axis=1)
+y = df['Label']
+
+from sklearn.model_selection import train_test_split
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42, stratify=y)
+
+from sklearn.preprocessing import StandardScaler
+
+# Initialize the scaler
+scaler = StandardScaler()
+
+# Fit and transform the training data, and transform the test data
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+from sklearn.decomposition import PCA
+
+# Fit PCA without specifying the number of components to compute all components
+pca = PCA()
+pca.fit(X_train)
+
+# Calculate the cumulative explained variance
+cumulative_variance = pca.explained_variance_ratio_.cumsum()
+
+# Find the number of components that meet the threshold
+explained_variance_threshold = 0.95
+n_components_best = (cumulative_variance >= explained_variance_threshold).argmax() + 1
+
+# Apply PCA with the optimal number of components
+pca = PCA(n_components=n_components_best)
+X_train = pca.fit_transform(X_train)
+X_test = pca.transform(X_test)
+
+import numpy as np
+
+def create_sequences(X, y, sequence_length):
+    sequences_X = [X[i:i + sequence_length] for i in range(0, len(X) - sequence_length + 1, sequence_length)]
+    sequences_y = [y.iloc[i + sequence_length - 1] for i in range(0, len(X) - sequence_length + 1, sequence_length)]
+    return np.array(sequences_X), np.array(sequences_y)
+
+sequence_length = 100
+X_train_seq, y_train_seq = create_sequences(X_train, y_train, sequence_length)
+X_test_seq, y_test_seq = create_sequences(X_test, y_test, sequence_length)
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Bidirectional, Dense, Dropout
+import keras_tuner as kt
+from keras_tuner import HyperModel
+
+class LSTMHyperModel(HyperModel):
+    def build(self, hp):
+        model = Sequential()
+        
+        model.add(Bidirectional(LSTM(128, return_sequences=True, activation='tanh', input_shape=(X_train_seq.shape[1], X_train_seq.shape[2]))))
+        model.add(Bidirectional(LSTM(64, return_sequences=False, activation='tanh')))
+        model.add(Dropout(0.2))  # Dropout layer for regularization
+        model.add(Dense(64, activation='LeakyReLU'))
+        model.add(Dense(1, activation='sigmoid'))  # Binary classification output
+        
+        model.compile(optimizer=hp.Choice('optimizer', values=['adam', 'rmsprop']),
+                      loss='binary_crossentropy', metrics=['accuracy'])
+        return model
+
+# Initialize Keras Tuner with RandomSearch
+tuner = kt.RandomSearch(LSTMHyperModel(), objective='val_accuracy', max_trials=5, executions_per_trial=2)
+
+# Implement EarlyStopping to prevent overfitting
+early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=3, restore_best_weights=True)
+
+# Search for the best hyperparameters
+tuner.search(X_train_seq, y_train_seq, epochs=10, validation_data=(X_test_seq, y_test_seq), callbacks=[early_stopping])
+
+# Get the best model
+best_model = tuner.get_best_models()[0]
+
+history = best_model.fit(X_train_seq, y_train_seq, validation_data=(X_test_seq, y_test_seq), epochs=30, batch_size=32, callbacks=[early_stopping])
+
+from sklearn.preprocessing import Binarizer
+
+# Apply Binarizer to the predicted probabilities
+binarizer = Binarizer(threshold=0.5)
+y_pred_prob = best_model.predict(X_test_seq)
+y_pred = binarizer.fit_transform(y_pred_prob.reshape(-1, 1)).flatten()
+
+from sklearn.metrics import accuracy_score, recall_score, f1_score, roc_auc_score
+
+accuracy = accuracy_score(y_test_seq, y_pred)
+print(f"Accuracy: {accuracy:.4f}")
+
+recall = recall_score(y_test_seq, y_pred)
+print(f"Recall: {recall:.4f}")
+
+f1 = f1_score(y_test_seq, y_pred)
+print(f"F1 Score: {f1:.4f}")
+
+roc_auc = roc_auc_score(y_test_seq, y_pred_prob)
+print(f"ROC-AUC Score: {roc_auc:.4f}")
+
+from sklearn.metrics import classification_report
+
+print("Classification Report:")
+print(classification_report(y_test_seq, y_pred))
+
+from sklearn.metrics import roc_curve, auc
+import matplotlib.pyplot as plt
+
+# ROC Curve
+fpr, tpr, thresholds = roc_curve(y_test_seq, y_pred_prob)
+roc_auc_val = auc(fpr, tpr)
+
+# Plot ROC curve
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc_val:.2f})')
+plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic')
+plt.legend(loc='lower right')
+plt.show()
+
+# Confusion Matrix
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+
+cm = confusion_matrix(y_test_seq, y_pred)
+f, ax = plt.subplots(figsize=(5, 5))
+sns.heatmap(cm, annot=True, fmt='.0f', linewidths=0.5, linecolor="r", ax=ax)
+
+plt.xlabel('Predicted Labels')
+plt.ylabel('True Labels')
+plt.title('Confusion Matrix')
+plt.show()
+
+              precision    recall  f1-score   support
+           0       0.97      0.97      0.97      6854
+           1       0.87      0.87      0.87      1638
+    accuracy                           0.95      8492
+   macro avg       0.92      0.92      0.92      8492
+weighted avg       0.95      0.95      0.95      8492
